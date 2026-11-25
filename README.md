@@ -16,11 +16,19 @@ QQ 邮箱 IMAP
         ├─ PDF：pypdf 抽文本 + 正则
         └─ ZIP：内含同一张发票的 pdf + ofd，两个都取
    ↓ 发票号码（20 位）去重
-阿里云 OSS  私有桶/12306/<日期> <出发>-<到达> <车次> <发票号>.pdf|.ofd
+阿里云 OSS  invoices/<日期> <出发>-<到达> <车次>/<发票号>/<发票号>.pdf|.ofd
 Tablestore  ticket-archiver / invoices   ← 元数据，主键 invoice_no
    ↓ 有新增
 飞书群「12306 发票归档」
 ```
+
+## 目录结构
+
+```
+invoices/<乘车日期> <出发>-<到达> <车次>/<发票号>/<发票号>.pdf|.ofd
+```
+
+一趟车一个文件夹，每张票一个子文件夹，里面同时有 ofd 与 pdf。
 
 ## 去重
 
