@@ -79,18 +79,17 @@ python3 scripts/deploy.py
 构建细节见 `scripts/build_pkg.py`：去掉平台二进制、用纯 Python CRC32C、
 aiohttp 改可选、剔除 numpy。因此代码包与运行平台无关，本地可直接测试。
 
-## 自动部署（GitHub Actions）
+## 定时执行（GitHub Actions）
 
-推送 `fc/`、`vendor/` 或 `scripts/build_pkg.py` 到 `master` 会触发
-[`.github/workflows/deploy-scf.yml`](.github/workflows/deploy-scf.yml)：
+[`.github/workflows/archive.yml`](.github/workflows/archive.yml) 每天
+12:00 UTC（20:00 北京时间）直接跑 `python3 fc/index.py`，也可手动触发。
+每次运行都 checkout `master` 最新代码，改完推送即生效，不需要额外部署。
 
-1. `pip install tccli`，`scripts/build_pkg.py` 构建纯 Python 包；
-2. `tccli cos upload` 上传到 COS 中转；
-3. `tccli scf UpdateFunction` 更新函数代码（环境变量保持不变）；
-4. `tccli scf GetFunction` 校验状态。
+仓库 Secrets：`EMAIL_ACCOUNT`、`EMAIL_AUTH_CODE`、`FEISHU_APP_ID`、
+`FEISHU_APP_SECRET`、`FEISHU_CHAT_ID`、`ALIBABA_CLOUD_ACCESS_KEY_ID`、
+`ALIBABA_CLOUD_ACCESS_KEY_SECRET`（阿里云 RAM 用户 `ticket-archiver-scf`）。
 
-仓库 Secrets 只需要 `TENCENT_SECRET_ID` / `TENCENT_SECRET_KEY`，
-对应 CAM 子用户 `ticket-archiver-deploy`（仅 SCF 更新 + COS 代码包读写）。
+腾讯云 SCF 版本保留作手动/旁路执行，定时器已关闭，避免与 Actions 重复跑。
 
 ## 本地验证
 
