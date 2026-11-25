@@ -1,37 +1,88 @@
-# ticket-archiver - 火车电子发票自动归档
+# ticket-archiver
 
-从 QQ 邮箱下载 12306 电子发票（铁路电子客票），自动解析中文站名、车次，按 **日期 出发站-到达站 车次** 格式重命名，上传到百度网盘归档。
+12306 铁路电子发票自动归档。阿里云函数计算（FC 3.0，`cn-beijing`，Python 3.12）。
 
-## 使用
+每天 20:00（北京时间）登录 QQ 邮箱，抓 `12306@rails.com.cn` 的发票邮件，
+解析发票要素，按**发票号码**幂等归档：文件写 OSS，元数据写 Tablestore，
+有新发票时推送到飞书群。
+
+## 处理链路
+
+```
+QQ 邮箱 IMAP
+   └─ 附件 .zip / .ofd / .pdf
+        ├─ OFD：解包读 rai_issuer_*.xml（XBRL，字段最全）
+        ├─ PDF：pypdf 抽文本 + 正则
+        └─ ZIP：内含同一张发票的 pdf + ofd，两个都取
+   ↓ 发票号码（20 位）去重
+OSS  oss://train-invoice-mint/12306/<日期> <出发>-<到达> <车次> <发票号>.pdf|.ofd
+Tablestore  ticket-archiver / invoices   ← 元数据，主键 invoice_no
+   ↓ 有新增
+飞书群「12306 发票归档」
+```
+
+## 去重
+
+同一张发票会以多种形态出现（zip 内含 pdf+ofd、裸 ofd、裸 pdf，甚至同一封邮件重复），
+因此**不按文件名去重**，而是：
+
+1. 解析出发票号码 `ElectronicInvoiceRailwayETicketNumber`；
+2. 以 `invoice_no` 为主键查 Tablestore，命中即跳过；
+3. 同一批次内再用内存集合去重。
+
+重复执行是安全的：已验证重跑 `uploaded=0`。
+
+## 数据模型（`invoices`）
+
+| 字段 | 来源 |
+|---|---|
+| `invoice_no`（主键） | 发票号码 |
+| `issue_date` / `business_type` | 开票日期 / 购·退 |
+| `travel_date` / `depart_time` | 乘车日期 / 开车时间 |
+| `from_station` / `to_station` / `train_no` | 行程 |
+| `seat_level` / `carriage` / `seat` | 席别、车厢、座位 |
+| `fare` / `tax_rate` / `tax_amount` / `amount_excl_tax` | 金额 |
+| `eticket_no` / `passenger_name` / `id_masked` | 电子客票号、乘客（证件号打码） |
+| `oss_pdf_key` / `oss_ofd_key` / `formats` | 归档位置 |
+| `source_file` / `archived_at` | 来源附件、归档时间 |
+
+## 部署
 
 ```bash
-# 1. 复制环境变量模板
-cp .env.example .env
-
-# 2. 编辑 .env 填写邮箱账号和授权码
-# vim .env
-
-# 3. 运行
-python3 archiver.py
+python3 scripts/deploy.py
 ```
 
-## 依赖
+依赖：
 
-- Python 3.8+
-- IMAP 邮箱（QQ邮箱 / Foxmail）
+- `~/.config/ticket-archiver/deploy-credentials.json`（0600）：部署 RAM 用户 `ticket-archiver-deploy` 的 AK；
+- Infisical `tools/prod` → `/ticket-archiver`：`EMAIL_ACCOUNT`、`EMAIL_AUTH_CODE`、
+  `FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`FEISHU_CHAT_ID`；
+- 运行时 RAM 角色 `ticket-archiver-fc`（OSS 对象读写 + `invoices` 表读写）。
 
-## 文件说明
+`scripts/deploy.py` 会构建纯 Python 代码包（约 2 MiB）、上传到
+`oss://ticket-archiver-code/fc/ticket-archiver.zip`，再创建/更新函数与每日定时触发器。
 
-| 文件 | 说明 |
-|------|------|
-| `archiver.py` | 主脚本：下载邮件附件 → 解析OFD → 重命名 → 上传网盘 |
-| `.env.example` | 环境变量模板 |
-| `station_map.py` | (可选) 手动维护的站名拼音→中文映射 |
+构建细节见 `scripts/build_pkg.py`：去掉平台二进制、用纯 Python CRC32C、
+aiohttp 改可选、剔除 numpy。因此代码包与运行平台无关，本地可直接测试。
 
-## 文件名格式
+## 本地验证
 
+```bash
+# 用环境变量跑一次（需要 OSS / Tablestore 权限）
+EMAIL_ACCOUNT=... EMAIL_AUTH_CODE=... \
+ALIBABA_CLOUD_ACCESS_KEY_ID=... ALIBABA_CLOUD_ACCESS_KEY_SECRET=... \
+python3 fc/index.py
 ```
-2026-04-10 北京西-珠海 D923.zip
-```
 
-`日期` `出发站-到达站` `车次`
+## 运维
+
+- 日志：函数计算控制台 → `ticket-archiver` → 调用日志；
+- 手动触发：`aliyun fc invoke-function --function-name ticket-archiver --biz-body '{}'`；
+- 重建归档：删除对应 `invoices` 行后再次触发，会重新上传并重新入库；
+- 令牌轮换：QQ 授权码变更后更新 Infisical，再执行一次 `scripts/deploy.py`。
+
+## 说明
+
+- 仅归档发票，不登录 12306、不购票；
+- 邮箱授权码只存在于 Infisical 与函数环境变量，仓库中没有任何真实凭据；
+- 早期基于 `bdpan` 的本地 CLI 版本已被云函数版取代，见 Git 历史。
