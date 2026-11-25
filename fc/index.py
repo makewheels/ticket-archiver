@@ -28,11 +28,11 @@ import time
 import urllib.parse
 import urllib.request
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 
 from pypdf import PdfReader
-from tablestore import OTSClient, Row
+from tablestore import Direction, INF_MAX, INF_MIN, OTSClient, Row
 
 SENDER = "12306@rails.com.cn"
 
@@ -107,6 +107,22 @@ def already_archived(client: OTSClient, invoice_no: str) -> bool:
     return row is not None and len(row.primary_key) > 0
 
 
+def count_invoices(client: OTSClient, cap: int = 2000) -> int:
+    """统计已归档张数（只读主键，够用于卡片副标题）。"""
+    table = os.environ.get("OTS_TABLE", "invoices")
+    total = 0
+    start = [("invoice_no", INF_MIN)]
+    while total < cap:
+        _, next_start, rows, _ = client.get_range(
+            table, Direction.FORWARD, ["invoice_no"], 1, 100,
+            start, [("invoice_no", INF_MAX)])
+        total += len(rows)
+        if not rows or next_start is None:
+            break
+        start = next_start
+    return total
+
+
 def save_meta(client: OTSClient, meta: dict) -> None:
     table = os.environ.get("OTS_TABLE", "invoices")
     pk = [("invoice_no", meta["invoice_no"])]
@@ -126,7 +142,70 @@ def _post_json(url: str, payload: dict, token: str = "") -> dict:
         return json.loads(r.read().decode())
 
 
-def feishu_notify(text: str) -> None:
+def _bj_now() -> datetime:
+    return datetime.now(timezone(timedelta(hours=8)))
+
+
+def _money(value) -> str:
+    try:
+        return f"¥{float(value):.2f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def build_card(items: list[dict], total: int) -> dict:
+    """卡片：标题栏报时间，正文用表格列出发票，底部标注存储与发送时间。"""
+    rows = []
+    for meta in items[:50]:
+        rows.append({
+            "date": meta.get("travel_date") or meta.get("issue_date") or "—",
+            "route": f"{meta.get('from_station') or '—'} → {meta.get('to_station') or '—'}",
+            "train": meta.get("train_no") or "—",
+            "type": "退票" if meta.get("business_type") == "退" else "购票",
+            "fare": _money(meta.get("fare")),
+        })
+
+    now = _bj_now()
+    elements = [{
+        "tag": "table",
+        "page_size": 10,
+        "row_height": "low",
+        "header_style": {"text_align": "left", "text_size": "normal",
+                         "background_style": "grey", "bold": True, "lines": 1},
+        "columns": [
+            {"name": "date", "display_name": "乘车", "data_type": "text",
+             "horizontal_align": "left", "width": "auto"},
+            {"name": "route", "display_name": "行程", "data_type": "text",
+             "horizontal_align": "left", "width": "auto"},
+            {"name": "train", "display_name": "车次", "data_type": "text",
+             "horizontal_align": "center", "width": "auto"},
+            {"name": "type", "display_name": "类型", "data_type": "text",
+             "horizontal_align": "center", "width": "auto"},
+            {"name": "fare", "display_name": "金额", "data_type": "text",
+             "horizontal_align": "right", "width": "auto"},
+        ],
+        "rows": rows,
+    }]
+    if len(items) > 50:
+        elements.append({"tag": "markdown", "content": f"…另有 {len(items) - 50} 张未在表格中展示"})
+    elements.extend([
+        {"tag": "hr"},
+        {"tag": "markdown", "content": f"📦 存储  `oss://{os.environ.get('OSS_BUCKET', 'train-invoice-mint')}/"
+                                       f"{os.environ.get('OSS_PREFIX', '12306/')}`"},
+        {"tag": "markdown", "content": f"<font color='grey'>发送时间 {now.strftime('%Y-%m-%d %H:%M')}</font>"},
+    ])
+    return {
+        "schema": "2.0",
+        "header": {
+            "template": "blue",
+            "title": {"tag": "plain_text", "content": f"🚄 12306 发票归档 · {now.strftime('%m-%d %H:%M')}"},
+            "subtitle": {"tag": "plain_text", "content": f"本次 {len(items)} 张 · 累计 {total} 张"},
+        },
+        "body": {"elements": elements},
+    }
+
+
+def feishu_notify(items: list[dict], total: int) -> None:
     app_id = os.environ.get("FEISHU_APP_ID", "")
     app_secret = os.environ.get("FEISHU_APP_SECRET", "")
     chat_id = os.environ.get("FEISHU_CHAT_ID", "")
@@ -138,9 +217,20 @@ def feishu_notify(text: str) -> None:
     if not token:
         print("[warn] 飞书 token 获取失败")
         return
-    _post_json(f"https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id",
-               {"receive_id": chat_id, "msg_type": "text",
-                "content": json.dumps({"text": text}, ensure_ascii=False)}, token=token)
+
+    url = "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id"
+    card = build_card(items, total)
+    resp = _post_json(url, {"receive_id": chat_id, "msg_type": "interactive",
+                            "content": json.dumps(card, ensure_ascii=False)}, token=token)
+    if resp.get("code") == 0:
+        return
+    # 卡片被拒时退回纯文本，保证通知不丢
+    print(f"[warn] 卡片发送失败 {resp.get('code')} {resp.get('msg')}，回退纯文本")
+    lines = [f"{m.get('travel_date', '')} {m.get('from_station', '')}→{m.get('to_station', '')} "
+             f"{m.get('train_no', '')} {_money(m.get('fare'))}" for m in items[:10]]
+    text = f"12306 发票归档 {len(items)} 张（累计 {total}）\n" + "\n".join(lines)
+    _post_json(url, {"receive_id": chat_id, "msg_type": "text",
+                     "content": json.dumps({"text": text}, ensure_ascii=False)}, token=token)
 
 
 # ────────────────────────── 邮件 ──────────────────────────
@@ -350,12 +440,12 @@ def handler(event, context):
         print(f"[ok] {invoice_no} {stem}")
 
     if new_items:
-        def line(m):
-            route = f"{m.get('from_station','?')}→{m.get('to_station','?')}"
-            return f"· {m.get('travel_date','')} {route} {m.get('train_no','')} ¥{m.get('fare','?')}"
-        body = "\n".join(line(m) for m in new_items[:10])
-        extra = f"\n…另有 {len(new_items) - 10} 张" if len(new_items) > 10 else ""
-        feishu_notify(f"🚄 12306 发票归档 {len(new_items)} 张\n{body}{extra}\noss://{oss.bucket}/{prefix}")
+        try:
+            total = count_invoices(ots)
+        except Exception as exc:  # 统计失败不影响通知
+            print("[warn] 统计累计张数失败:", type(exc).__name__)
+            total = len(new_items)
+        feishu_notify(new_items, total)
 
     return {
         "attachments": len(atts),
