@@ -114,8 +114,8 @@ def count_invoices(client: OTSClient, cap: int = 2000) -> int:
     start = [("invoice_no", INF_MIN)]
     while total < cap:
         _, next_start, rows, _ = client.get_range(
-            table, Direction.FORWARD, ["invoice_no"], 1, 100,
-            start, [("invoice_no", INF_MAX)])
+            table, Direction.FORWARD, start, [("invoice_no", INF_MAX)],
+            columns_to_get=["invoice_no"], limit=100)
         total += len(rows)
         if not rows or next_start is None:
             break
@@ -154,45 +154,24 @@ def _money(value) -> str:
 
 
 def build_card(items: list[dict], total: int) -> dict:
-    """卡片：标题栏报时间，正文用表格列出发票，底部标注存储与发送时间。"""
-    rows = []
-    for meta in items[:50]:
-        rows.append({
-            "date": meta.get("travel_date") or meta.get("issue_date") or "—",
-            "route": f"{meta.get('from_station') or '—'} → {meta.get('to_station') or '—'}",
-            "train": meta.get("train_no") or "—",
-            "type": "退票" if meta.get("business_type") == "退" else "购票",
-            "fare": _money(meta.get("fare")),
-        })
-
+    """竖排卡片：一张发票两行，标题栏报时间，底部只留发送时间。"""
     now = _bj_now()
-    elements = [{
-        "tag": "table",
-        "page_size": 10,
-        "row_height": "low",
-        "header_style": {"text_align": "left", "text_size": "normal",
-                         "background_style": "grey", "bold": True, "lines": 1},
-        "columns": [
-            {"name": "date", "display_name": "乘车", "data_type": "text",
-             "horizontal_align": "left", "width": "auto"},
-            {"name": "route", "display_name": "行程", "data_type": "text",
-             "horizontal_align": "left", "width": "auto"},
-            {"name": "train", "display_name": "车次", "data_type": "text",
-             "horizontal_align": "center", "width": "auto"},
-            {"name": "type", "display_name": "类型", "data_type": "text",
-             "horizontal_align": "center", "width": "auto"},
-            {"name": "fare", "display_name": "金额", "data_type": "text",
-             "horizontal_align": "right", "width": "auto"},
-        ],
-        "rows": rows,
-    }]
-    if len(items) > 50:
-        elements.append({"tag": "markdown", "content": f"…另有 {len(items) - 50} 张未在表格中展示"})
+    blocks = []
+    for meta in items[:10]:
+        date_ = meta.get("travel_date") or meta.get("issue_date") or "—"
+        route = f"{meta.get('from_station') or '—'} → {meta.get('to_station') or '—'}"
+        kind = "退票" if meta.get("business_type") == "退" else "购票"
+        detail = "　".join(x for x in (meta.get("train_no") or "", kind, _money(meta.get("fare"))) if x)
+        blocks.append(f"**{date_}　{route}**\n{detail}")
+
+    elements = [{"tag": "markdown", "content": "\n\n".join(blocks)}]
+    if len(items) > 10:
+        elements.append({"tag": "markdown",
+                         "content": f"<font color='grey'>…另有 {len(items) - 10} 张未展示</font>"})
     elements.extend([
         {"tag": "hr"},
-        {"tag": "markdown", "content": f"📦 存储  `oss://{os.environ.get('OSS_BUCKET', 'train-invoice-mint')}/"
-                                       f"{os.environ.get('OSS_PREFIX', '12306/')}`"},
-        {"tag": "markdown", "content": f"<font color='grey'>发送时间 {now.strftime('%Y-%m-%d %H:%M')}</font>"},
+        {"tag": "markdown",
+         "content": f"<font color='grey'>已归档到私有对象存储 · {now.strftime('%Y-%m-%d %H:%M')}</font>"},
     ])
     return {
         "schema": "2.0",
@@ -389,7 +368,7 @@ def handler(event, context):
     started = time.time()
     prefix = os.environ.get("OSS_PREFIX", "12306/")
     oss = Oss(
-        bucket=os.environ.get("OSS_BUCKET", "train-invoice-mint"),
+        bucket=os.environ.get("OSS_BUCKET", "train-invoice-archive"),
         endpoint=os.environ.get("OSS_ENDPOINT", "oss-cn-beijing.aliyuncs.com"),
         ak=os.environ["ALIBABA_CLOUD_ACCESS_KEY_ID"],
         sk=os.environ["ALIBABA_CLOUD_ACCESS_KEY_SECRET"],
