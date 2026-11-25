@@ -92,10 +92,10 @@ class Oss:
 
 def ots_client() -> OTSClient:
     return OTSClient(
-        os.environ.get("OTS_ENDPOINT", "https://ticket-archiver.cn-beijing.ots.aliyuncs.com"),
+        os.environ.get("OTS_ENDPOINT", "https://train-invoice.cn-beijing.ots.aliyuncs.com"),
         os.environ["ALIBABA_CLOUD_ACCESS_KEY_ID"],
         os.environ["ALIBABA_CLOUD_ACCESS_KEY_SECRET"],
-        os.environ.get("OTS_INSTANCE", "ticket-archiver"),
+        os.environ.get("OTS_INSTANCE", "train-invoice"),
         sts_token=os.environ.get("ALIBABA_CLOUD_SECURITY_TOKEN") or None,
         enable_native=False,
     )
@@ -350,15 +350,14 @@ def split_attachment(att: dict) -> tuple[dict, dict]:
     return meta, payloads
 
 
-def object_stem(meta: dict, att: dict) -> str:
+def trip_folder(meta: dict, att: dict) -> str:
+    """一趟车一个文件夹：日期 出发-到达 车次。"""
     date_ = meta.get("travel_date") or meta.get("issue_date") or att.get("mail_date") or "unknown"
     parts = [date_]
     if meta.get("from_station") and meta.get("to_station"):
         parts.append(f"{meta['from_station']}-{meta['to_station']}")
     if meta.get("train_no"):
         parts.append(meta["train_no"])
-    if meta.get("invoice_no"):
-        parts.append(meta["invoice_no"])
     return " ".join(parts)
 
 
@@ -366,7 +365,7 @@ def object_stem(meta: dict, att: dict) -> str:
 
 def handler(event, context):
     started = time.time()
-    prefix = os.environ.get("OSS_PREFIX", "12306/")
+    prefix = os.environ.get("OSS_PREFIX", "invoices/")
     oss = Oss(
         bucket=os.environ.get("OSS_BUCKET", "train-invoice-archive"),
         endpoint=os.environ.get("OSS_ENDPOINT", "oss-cn-beijing.aliyuncs.com"),
@@ -392,12 +391,12 @@ def handler(event, context):
             continue
         seen.add(invoice_no)
 
-        stem = object_stem(meta, att)
+        folder = trip_folder(meta, att)
         keys = {}
         for fmt, ctype in (("pdf", "application/pdf"), ("ofd", "application/ofd")):
             if fmt not in payloads:
                 continue
-            key = f"{prefix}{stem}.{fmt}"
+            key = f"{prefix}{folder}/{invoice_no}/{invoice_no}.{fmt}"
             oss.put(key, payloads[fmt], content_type=ctype)
             keys[fmt] = key
 
@@ -416,7 +415,7 @@ def handler(event, context):
                     pass
         save_meta(ots, meta)
         new_items.append(meta)
-        print(f"[ok] {invoice_no} {stem}")
+        print(f"[ok] {invoice_no} {folder}")
 
     if new_items:
         try:
