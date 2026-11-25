@@ -89,7 +89,7 @@ aiohttp 改可选、剔除 numpy。因此代码包与运行平台无关，本地
 `FEISHU_APP_SECRET`、`FEISHU_CHAT_ID`、`ALIBABA_CLOUD_ACCESS_KEY_ID`、
 `ALIBABA_CLOUD_ACCESS_KEY_SECRET`（阿里云 RAM 用户 `ticket-archiver-scf`）。
 
-腾讯云 SCF 版本保留作手动/旁路执行，定时器已关闭，避免与 Actions 重复跑。
+归档执行只跑 GitHub Actions；腾讯云 SCF、CAM 部署身份与阿里云函数计算均已删除。
 
 ## 本地验证
 
