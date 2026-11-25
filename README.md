@@ -1,6 +1,7 @@
 # ticket-archiver
 
-12306 铁路电子发票自动归档。阿里云函数计算（FC 3.0，`cn-beijing`，Python 3.12）。
+12306 铁路电子发票自动归档。计算在**腾讯云云函数 SCF**（`ap-beijing`，Python 3.10），
+存储仍在**阿里云**（OSS 放文件、Tablestore 放元数据）。
 
 每天 20:00（北京时间）登录 QQ 邮箱，抓 `12306@rails.com.cn` 的发票邮件，
 解析发票要素，按**发票号码**幂等归档：文件写 OSS，元数据写 Tablestore，
@@ -15,7 +16,7 @@ QQ 邮箱 IMAP
         ├─ PDF：pypdf 抽文本 + 正则
         └─ ZIP：内含同一张发票的 pdf + ofd，两个都取
    ↓ 发票号码（20 位）去重
-OSS  私有桶/12306/<日期> <出发>-<到达> <车次> <发票号>.pdf|.ofd
+阿里云 OSS  私有桶/12306/<日期> <出发>-<到达> <车次> <发票号>.pdf|.ofd
 Tablestore  ticket-archiver / invoices   ← 元数据，主键 invoice_no
    ↓ 有新增
 飞书群「12306 发票归档」
@@ -67,16 +68,29 @@ python3 scripts/deploy.py
 
 依赖：
 
-- `~/.config/ticket-archiver/deploy-credentials.json`（0600）：部署 RAM 用户 `ticket-archiver-deploy` 的 AK；
+- `tccli` 已配置（`ap-beijing`）；
 - Infisical `tools/prod` → `/ticket-archiver`：`EMAIL_ACCOUNT`、`EMAIL_AUTH_CODE`、
-  `FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`FEISHU_CHAT_ID`；
-- 运行时 RAM 角色 `ticket-archiver-fc`（OSS 对象读写 + `invoices` 表读写）。
+  `FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`FEISHU_CHAT_ID`，以及阿里云 RAM 用户
+  `ticket-archiver-scf` 的 `ALIBABA_CLOUD_ACCESS_KEY_ID/SECRET`（OSS + Tablestore 最小权限）。
 
-`scripts/deploy.py` 会构建纯 Python 代码包（约 2 MiB）、上传到
-`oss://ticket-archiver-code/fc/ticket-archiver.zip`，再创建/更新函数与每日定时触发器。
+`scripts/deploy.py` 会构建纯 Python 代码包（约 2 MiB）、上传到 COS 中转，
+再创建/更新 SCF 函数与每日定时触发器（`0 0 20 * * * *`，北京时间）。
 
 构建细节见 `scripts/build_pkg.py`：去掉平台二进制、用纯 Python CRC32C、
 aiohttp 改可选、剔除 numpy。因此代码包与运行平台无关，本地可直接测试。
+
+## 自动部署（GitHub Actions）
+
+推送 `fc/`、`vendor/` 或 `scripts/build_pkg.py` 到 `master` 会触发
+[`.github/workflows/deploy-scf.yml`](.github/workflows/deploy-scf.yml)：
+
+1. `pip install tccli`，`scripts/build_pkg.py` 构建纯 Python 包；
+2. `tccli cos upload` 上传到 COS 中转；
+3. `tccli scf UpdateFunction` 更新函数代码（环境变量保持不变）；
+4. `tccli scf GetFunction` 校验状态。
+
+仓库 Secrets 只需要 `TENCENT_SECRET_ID` / `TENCENT_SECRET_KEY`，
+对应 CAM 子用户 `ticket-archiver-deploy`（仅 SCF 更新 + COS 代码包读写）。
 
 ## 本地验证
 

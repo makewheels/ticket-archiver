@@ -1,0 +1,59 @@
+name: deploy-scf
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "fc/**"
+      - "vendor/**"
+      - "scripts/build_pkg.py"
+      - ".github/workflows/deploy-scf.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-scf
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tccli
+        run: pip install -q tccli
+
+      - name: Build package
+        run: python3 scripts/build_pkg.py
+
+      - name: Upload package and update function
+        env:
+          TENCENTCLOUD_SECRET_ID: ${{ secrets.TENCENT_SECRET_ID }}
+          TENCENTCLOUD_SECRET_KEY: ${{ secrets.TENCENT_SECRET_KEY }}
+          TENCENTCLOUD_REGION: ap-beijing
+        run: |
+          tccli cos upload \
+            --bucket chat-develop-1253319037 \
+            --local_path build/ticket-archiver.zip \
+            --cos_key ticket-archiver/code.zip \
+            --region ap-beijing
+          tccli scf UpdateFunction \
+            --region ap-beijing \
+            --FunctionName ticket-archiver \
+            --Namespace default \
+            --Code '{"CosBucketName":"chat-develop-1253319037","CosObjectName":"/ticket-archiver/code.zip","CosBucketRegion":"ap-beijing"}'
+
+      - name: Verify function state
+        env:
+          TENCENTCLOUD_SECRET_ID: ${{ secrets.TENCENT_SECRET_ID }}
+          TENCENTCLOUD_SECRET_KEY: ${{ secrets.TENCENT_SECRET_KEY }}
+          TENCENTCLOUD_REGION: ap-beijing
+        run: |
+          tccli scf GetFunction --region ap-beijing --FunctionName ticket-archiver --Namespace default \
+            --filter 'FunctionName,Status,Runtime,Handler,MemorySize,Timeout,ModTime'
